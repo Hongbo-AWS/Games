@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>井字棋游戏</title>
+    <style>
+        .board {
+            display: grid;
+            grid-template-columns: repeat(3, 100px);
+            grid-gap: 5px;
+            margin: 20px;
+        }
+
+        .cell {
+            width: 100px;
+            height: 100px;
+            border: 1px solid black;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            cursor: pointer;
+        }
+
+        .status {
+            margin: 20px;
+            font-size: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="status" id="status">等待连接...</div>
+    <div class="board" id="board">
+        <div class="cell" data-row="0" data-col="0"></div>
+        <div class="cell" data-row="0" data-col="1"></div>
+        <div class="cell" data-row="0" data-col="2"></div>
+        <div class="cell" data-row="1" data-col="0"></div>
+        <div class="cell" data-row="1" data-col="1"></div>
+        <div class="cell" data-row="1" data-col="2"></div>
+        <div class="cell" data-row="2" data-col="0"></div>
+        <div class="cell" data-row="2" data-col="1"></div>
+        <div class="cell" data-row="2" data-col="2"></div>
+    </div>
+
+    <script>
+        const ws = new WebSocket('ws://127.0.0.1:8080');
+        const status = document.getElementById('status');
+        const board = document.getElementById('board');
+        let currentPlayer = null;
+
+        ws.onmessage = function (event) {
+            const message = JSON.parse(event.data);
+            if (message.Connect) {
+                currentPlayer = message.Connect.player;
+                status.textContent = `你是玩家 ${currentPlayer}`;
+            } else if (message.Move) {
+                const cell = document.querySelector(`[data-row="${message.Move.row}"][data-col="${message.Move.col}"]`);
+                cell.textContent = currentPlayer === 'X' ? 'O' : 'X';
+            } else if (message.Error) {
+                status.textContent = `错误: ${message.Error}`;
+            } else if (message.GameOver) {
+                if (message.GameOver.winner) {
+                    status.textContent = `游戏结束！${message.GameOver.winner} 获胜！`;
+                } else {
+                    status.textContent = '游戏结束！平局！';
+                }
+            }
+        };
+
+        board.addEventListener('click', function (event) {
+            const cell = event.target;
+            if (cell.classList.contains('cell') && !cell.textContent) {
+                const row = cell.dataset.row;
+                const col = cell.dataset.col;
+                const move = {
+                    Move: {
+                        row: parseInt(row),
+                        col: parseInt(col)
+                    }
+                };
+                ws.send(JSON.stringify(move));
+                cell.textContent = currentPlayer;
+            }
+        });
+    </script>
+</body>
+
+</html>

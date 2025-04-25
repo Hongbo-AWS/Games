@@ -1,0 +1,21 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "chess"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chess_server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full", "signal"] }
+tokio-tungstenite = "0.21"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3"
+uuid = { version = "1.7", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
