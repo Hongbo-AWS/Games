@@ -1,7 +1,6 @@
 use client::run_game;
 use std::io;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, WebSocketStream};
+use tokio_tungstenite::connect_async;
 
 #[tokio::main]
 async fn main() {

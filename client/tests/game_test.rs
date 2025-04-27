@@ -5,7 +5,8 @@ use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio::sync::mpsc::channel;
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 #[tokio::test]
 async fn test_game_over_handling() {
@@ -36,11 +37,7 @@ async fn test_invalid_move() {
 #[tokio::test]
 async fn test_player_quit() {
     let game_over = Arc::new(AtomicBool::new(false));
-    let (ws_stream, _) = tokio_tungstenite::connect_async("ws://localhost:8080")
-        .await
-        .unwrap();
-    let (mut write, _) = ws_stream.split();
-
-    let result = handle_user_input(&mut write, &game_over).await;
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Message>(32);
+    let result = handle_user_input(&tx, &game_over).await;
     assert!(result);
 }
