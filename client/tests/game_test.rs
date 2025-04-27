@@ -1,4 +1,4 @@
-use chess::{Board, GameMessage, Player};
+use chess::{Board, GameMessage, PlayerRole};
 use client::handle_game_message;
 use client::handle_user_input;
 use futures_util::StreamExt;
@@ -12,7 +12,7 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 async fn test_game_over_handling() {
     // 模拟游戏结束消息
     let game_over_msg = GameMessage::GameOver {
-        winner: Some(Player::X),
+        winner: Some(PlayerRole::Black),
     };
     let mut board = Board::new();
     let game_over = Arc::new(AtomicBool::new(false));

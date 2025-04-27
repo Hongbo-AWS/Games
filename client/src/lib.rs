@@ -26,6 +26,7 @@ pub async fn handle_game_message(game_msg: GameMessage, board: &mut Board) -> bo
             if let Err(e) = board.make_move(row, col) {
                 println!("移动错误: {}", e);
             }
+            board.display();
             false
         }
         GameMessage::Error(msg) => {
@@ -65,37 +66,50 @@ pub async fn handle_user_input(tx: &mpsc::Sender<Message>, game_over: &Arc<Atomi
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
 
-    match reader.read_line(&mut line).await {
-        Ok(0) => return true,
-        Ok(_) => {
-            let input = line.trim();
-            if input.eq_ignore_ascii_case("quit") {
-                game_over.store(true, Ordering::SeqCst);
-                return true;
-            }
-
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() == 3 && parts[0].eq_ignore_ascii_case("move") {
-                match (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
-                    (Ok(row), Ok(col)) => {
-                        let move_msg = GameMessage::Move { row, col };
-                        let json = serde_json::to_string(&move_msg).unwrap();
-                        println!("发送移动消息: {}", json);
-                        if let Err(e) = tx.send(Message::Text(json)).await {
-                            eprintln!("发送消息失败: {}", e);
-                            game_over.store(true, Ordering::SeqCst);
-                            return true;
-                        }
+    tokio::select! {
+        // 等待用户输入
+        result = reader.read_line(&mut line) => {
+            match result {
+                Ok(0) => return true,
+                Ok(_) => {
+                    let input = line.trim();
+                    if input.eq_ignore_ascii_case("quit") {
+                        game_over.store(true, Ordering::SeqCst);
+                        return true;
                     }
-                    _ => println!("无效的行/列。用法: move <行> <列> (0-2)"),
+
+                    let parts: Vec<&str> = input.split_whitespace().collect();
+                    if parts.len() == 3 && parts[0].eq_ignore_ascii_case("move") {
+                        match (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
+                            (Ok(row), Ok(col)) => {
+                                let move_msg = GameMessage::Move { row, col };
+                                let json = serde_json::to_string(&move_msg).unwrap();
+                                println!("发送移动消息: {}", json);
+                                if let Err(e) = tx.send(Message::Text(json)).await {
+                                    eprintln!("发送消息失败: {}", e);
+                                    game_over.store(true, Ordering::SeqCst);
+                                    return true;
+                                }
+                            }
+                            _ => println!("无效的行/列。用法: move <行> <列> (0-14)"),
+                        }
+                    } else {
+                        println!("无效的命令。用法: move <行> <列> (0-14)");
+                    }
                 }
-            } else {
-                println!("无效的命令。用法: move <行> <列> (0-2)");
+                Err(e) => {
+                    eprintln!("输入错误: {}", e);
+                    game_over.store(true, Ordering::SeqCst);
+                    return true;
+                }
             }
         }
-        Err(e) => {
-            eprintln!("输入错误: {}", e);
-            game_over.store(true, Ordering::SeqCst);
+        // 检查游戏是否结束
+        _ = async {
+            if game_over.load(Ordering::SeqCst) {
+                println!("游戏结束，关闭输入任务");
+            }
+        }, if game_over.load(Ordering::SeqCst) => {
             return true;
         }
     }
@@ -119,7 +133,7 @@ pub async fn run_game(
         return;
     }
 
-    println!("欢迎来到井字棋游戏！");
+    println!("欢迎来到五子棋游戏！");
     println!("等待服务器分配玩家角色...");
 
     // 处理接收消息的任务
@@ -135,7 +149,7 @@ pub async fn run_game(
                         println!("成功解析消息: {:?}", game_msg);
                         let mut board = board_clone.lock().await;
                         if handle_game_message(game_msg, &mut board).await {
-                            // 游戏结束，关闭连接
+                            println!("游戏结束，关闭读取任务");
                             game_over_clone.store(true, Ordering::SeqCst);
                             break;
                         }
@@ -144,20 +158,44 @@ pub async fn run_game(
                 }
             }
         }
+        println!("读取任务结束");
     });
 
     // 处理写入消息的任务
-    let write_task = tokio::spawn(async move {
-        let mut write = write;
-        while let Some(msg) = rx.recv().await {
-            if let Err(e) = write.send(msg).await {
-                eprintln!("发送消息失败: {}", e);
-                break;
+    let write_task = {
+        let game_over = Arc::clone(&game_over);
+        tokio::spawn(async move {
+            let mut write = write;
+            loop {
+                tokio::select! {
+                    maybe_msg = rx.recv() => {
+                        match maybe_msg {
+                            Some(msg) => {
+                                if let Err(e) = write.send(msg).await {
+                                    println!("写入任务错误: {}", e);
+                                    break;
+                                }
+                            },
+                            None => {
+                                println!("通道关闭，写入任务退出");
+                                break;
+                            }
+                        }
+                    },
+                    _ = async {
+                        if game_over.load(Ordering::Relaxed) {
+                            println!("游戏结束标志触发，写入任务退出");
+                        }
+                    }, if game_over.load(Ordering::Relaxed) => {
+                        break;
+                    }
+                }
             }
-        }
-    });
+            println!("写入任务结束");
+        })
+    };
 
-    println!("输入格式: move <行> <列> (例如: move 0 1)");
+    println!("输入格式: move <行> <列> (例如: move 7 7)");
     println!("输入 'quit' 退出游戏");
 
     // 处理用户输入
@@ -166,39 +204,47 @@ pub async fn run_game(
     let input_task = tokio::spawn(async move {
         while !game_over_clone.load(Ordering::SeqCst) {
             if handle_user_input(&tx_clone, &game_over_clone).await {
+                println!("游戏结束，关闭输入任务");
+                game_over_clone.store(true, Ordering::SeqCst);
                 break;
             }
         }
+        println!("输入任务结束");
     });
 
-    // 创建一个专门的任务来检查游戏状态
-    let game_over_clone = game_over.clone();
-    let check_task = tokio::spawn(async move {
-        while !game_over_clone.load(Ordering::SeqCst) {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        println!("游戏已结束，正在退出...");
-        // 强制退出程序
-        std::process::exit(0);
-    });
+    // // 使用 select! 宏同时等待多个任务
+    // tokio::select! {
+    //     result = read_task => {
+    //         if let Err(e) = result {
+    //             println!("读取任务错误: {}", e);
+    //         }
+    //     }
+    //     result = write_task => {
+    //         if let Err(e) = result {
+    //             println!("写入任务错误: {}", e);
+    //         }
+    //     }
+    //     result = input_task => {
+    //         if let Err(e) = result {
+    //             println!("输入任务错误: {}", e);
+    //         }
+    //     }
+    // }
+    // 等待所有任务完成
+    let (read_result, write_result, input_result) = tokio::join!(read_task, write_task, input_task);
 
-    // 等待读取任务完成
-    if let Err(e) = read_task.await {
-        eprintln!("读取任务错误: {}", e);
+    // 检查任务结果
+    if let Err(e) = read_result {
+        println!("读取任务错误: {}", e);
+    }
+    if let Err(e) = write_result {
+        println!("写入任务错误: {}", e);
+    }
+    if let Err(e) = input_result {
+        println!("输入任务错误: {}", e);
     }
 
-    // 等待输入任务完成
-    if let Err(e) = input_task.await {
-        eprintln!("输入任务错误: {}", e);
-    }
-
-    // 等待写入任务完成
-    if let Err(e) = write_task.await {
-        eprintln!("写入任务错误: {}", e);
-    }
-
-    // 等待检查任务完成
-    if let Err(e) = check_task.await {
-        eprintln!("检查任务错误: {}", e);
-    }
+    println!("\n游戏已结束，按回车键退出...");
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
 }

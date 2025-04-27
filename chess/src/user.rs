@@ -1,5 +1,5 @@
 use crate::GameError;
-use crate::Player;
+use crate::PlayerRole;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ pub struct User {
     pub id: String,             // 用户唯一标识
     pub name: String,           // 用户名
     pub session_id: String,     // 会话ID
-    pub player: Option<Player>, // 当前游戏中的角色
+    pub player: Option<PlayerRole>, // 当前游戏中的角色
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub struct UserSession {
 pub struct UserManager {
     users: HashMap<String, User>,                // 用户ID -> 用户信息
     sessions: HashMap<String, UserSession>,      // 会话ID -> 会话信息
-    player_assignments: HashMap<Player, String>, // 玩家 -> 用户ID
+    player_assignments: HashMap<PlayerRole, String>, // 玩家 -> 用户ID
 }
 
 impl UserManager {
@@ -62,7 +62,7 @@ impl UserManager {
             .and_then(|session| self.users.get(&session.user_id))
     }
 
-    pub fn assign_player(&mut self, user_id: &str, player: Player) -> Result<(), GameError> {
+    pub fn assign_player(&mut self, user_id: &str, player: PlayerRole) -> Result<(), GameError> {
         if self.player_assignments.contains_key(&player) {
             return Err(GameError::InvalidInput(
                 "Player already assigned".to_string(),
@@ -75,7 +75,7 @@ impl UserManager {
         Ok(())
     }
 
-    pub fn get_user_by_player(&self, player: &Player) -> Option<&User> {
+    pub fn get_user_by_player(&self, player: &PlayerRole) -> Option<&User> {
         self.player_assignments
             .get(player)
             .and_then(|user_id| self.users.get(user_id))
