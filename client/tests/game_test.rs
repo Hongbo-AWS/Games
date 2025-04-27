@@ -1,11 +1,8 @@
 use chess::{Board, GameMessage, Player};
 use client::handle_game_message;
-use client::handle_user_input;
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 #[tokio::test]
 async fn test_game_over_handling() {
@@ -14,7 +11,6 @@ async fn test_game_over_handling() {
         winner: Some(Player::X),
     };
     let mut board = Board::new();
-    let game_over = Arc::new(AtomicBool::new(false));
 
     // 测试处理游戏结束消息
     let result = handle_game_message(game_over_msg, &mut board).await;
