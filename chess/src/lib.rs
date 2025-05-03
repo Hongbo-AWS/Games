@@ -19,8 +19,12 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum GameMessage {
-    Connect {
+    ConnectRequest {
         username: String,
+    },
+    ConnectResponse {
+        username: String,
+        player_role: PlayerRole,
     },
     Move {
         row: usize,
@@ -351,7 +355,7 @@ impl NetworkPlayer {
         let username = match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 println!("收到连接消息: {}", text);
-                if let Ok(GameMessage::Connect { username }) = serde_json::from_str(&text) {
+                if let Ok(GameMessage::ConnectRequest { username }) = serde_json::from_str(&text) {
                     println!("新玩家 {} 正在连接...", username);
                     username
                 } else {
@@ -432,8 +436,9 @@ impl NetworkPlayer {
         // 发送连接成功消息
         let _ = ws_sender
             .send(Message::Text(
-                serde_json::to_string(&GameMessage::Connect {
+                serde_json::to_string(&GameMessage::ConnectResponse {
                     username: user.name.clone(),
+                    player_role: player,
                 })
                 .unwrap(),
             ))

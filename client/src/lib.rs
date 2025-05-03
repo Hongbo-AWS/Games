@@ -3,8 +3,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -61,58 +61,46 @@ pub async fn handle_game_message(game_msg: GameMessage, board: &mut Board) -> bo
     }
 }
 
-pub async fn handle_user_input(tx: &mpsc::Sender<Message>, game_over: &Arc<AtomicBool>) -> bool {
+pub async fn handle_user_input(tx: &mpsc::Sender<Message>) -> bool {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
 
-    tokio::select! {
-        // 等待用户输入
-        result = reader.read_line(&mut line) => {
-            match result {
-                Ok(0) => return true,
-                Ok(_) => {
-                    let input = line.trim();
-                    if input.eq_ignore_ascii_case("quit") {
-                        game_over.store(true, Ordering::SeqCst);
-                        return true;
-                    }
+    // 等待用户输入
+    let result = reader.read_line(&mut line).await;
 
-                    let parts: Vec<&str> = input.split_whitespace().collect();
-                    if parts.len() == 3 && parts[0].eq_ignore_ascii_case("move") {
-                        match (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
-                            (Ok(row), Ok(col)) => {
-                                let move_msg = GameMessage::Move { row, col };
-                                let json = serde_json::to_string(&move_msg).unwrap();
-                                println!("发送移动消息: {}", json);
-                                if let Err(e) = tx.send(Message::Text(json)).await {
-                                    eprintln!("发送消息失败: {}", e);
-                                    game_over.store(true, Ordering::SeqCst);
-                                    return true;
-                                }
-                            }
-                            _ => println!("无效的行/列。用法: move <行> <列> (0-14)"),
+    match result {
+        Ok(0) => return true,
+        Ok(_) => {
+            let input = line.trim();
+            if input.eq_ignore_ascii_case("quit") {
+                return true;
+            }
+
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 && parts[0].eq_ignore_ascii_case("move") {
+                match (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
+                    (Ok(row), Ok(col)) => {
+                        let move_msg = GameMessage::Move { row, col };
+                        let json = serde_json::to_string(&move_msg).unwrap();
+                        println!("发送移动消息: {}", json);
+                        if let Err(e) = tx.send(Message::Text(json)).await {
+                            eprintln!("发送消息失败: {}", e);
+                            return true;
                         }
-                    } else {
-                        println!("无效的命令。用法: move <行> <列> (0-14)");
                     }
+                    _ => println!("无效的行/列。用法: move <行> <列> (0-14)"),
                 }
-                Err(e) => {
-                    eprintln!("输入错误: {}", e);
-                    game_over.store(true, Ordering::SeqCst);
-                    return true;
-                }
+            } else {
+                println!("无效的命令。用法: move <行> <列> (0-14)");
             }
         }
-        // 检查游戏是否结束
-        _ = async {
-            if game_over.load(Ordering::SeqCst) {
-                println!("游戏结束，关闭输入任务");
-            }
-        }, if game_over.load(Ordering::SeqCst) => {
+        Err(e) => {
+            eprintln!("输入错误: {}", e);
             return true;
         }
     }
+
     false
 }
 
@@ -123,7 +111,8 @@ pub async fn run_game(
     let (mut write, mut read) = ws_stream.split();
     let (tx, mut rx) = mpsc::channel::<Message>(32);
     let board = Arc::new(Mutex::new(Board::new()));
-    let game_over = Arc::new(AtomicBool::new(false));
+
+    let (game_over_sender, _) = broadcast::channel::<()>(16);
 
     // 发送用户名到服务器
     let connect_msg = GameMessage::Connect { username };
@@ -138,32 +127,50 @@ pub async fn run_game(
 
     // 处理接收消息的任务
     let board_clone = board.clone();
-    let game_over_clone = game_over.clone();
-    let read_task = tokio::spawn(async move {
-        println!("开始监听服务器消息...");
-        while let Some(Ok(msg)) = read.next().await {
-            if let Message::Text(text) = msg {
-                println!("收到消息: {}", text);
-                match serde_json::from_str::<GameMessage>(&text) {
-                    Ok(game_msg) => {
-                        println!("成功解析消息: {:?}", game_msg);
-                        let mut board = board_clone.lock().await;
-                        if handle_game_message(game_msg, &mut board).await {
-                            println!("游戏结束，关闭读取任务");
-                            game_over_clone.store(true, Ordering::SeqCst);
+    let read_task = {
+        let game_over_sender = game_over_sender.clone();
+        let mut game_over_receiver = game_over_sender.subscribe();
+        tokio::spawn(async move {
+            println!("开始监听服务器消息...");
+            loop {
+                tokio::select! {
+                        _ = game_over_receiver.recv() => {
+                            println!("游戏结束标志触发，读取任务退出");
                             break;
                         }
-                    }
-                    Err(e) => eprintln!("解析消息失败: {}", e),
+                        result = read.next() => {
+                            match result {
+                                Some(Ok(msg)) => {
+                                    println!("收到消息: {}", msg);
+                                    if let Message::Text(text) = msg {
+                                        println!("收到消息: {}", text);
+                                        match serde_json::from_str::<GameMessage>(&text) {
+                                            Ok(game_msg) => {
+                                                println!("成功解析消息: {:?}", game_msg);
+                                                let mut board = board_clone.lock().await;
+                                                if handle_game_message(game_msg, &mut board).await {
+                                                    println!("游戏结束，关闭读取任务");
+                                                    let _ = game_over_sender.send(());
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => eprintln!("解析消息失败: {}", e),
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                 }
             }
-        }
-        println!("读取任务结束");
-    });
+
+            println!("读取任务结束");
+        })
+    };
 
     // 处理写入消息的任务
     let write_task = {
-        let game_over = game_over.clone();
+        let mut game_over_receiver = game_over_sender.subscribe();
         tokio::spawn(async move {
             let mut write = write;
             loop {
@@ -182,11 +189,8 @@ pub async fn run_game(
                             }
                         }
                     }
-                    _ = async {
-                        if game_over.load(Ordering::SeqCst) {
-                            println!("游戏结束标志触发，写入任务退出");
-                        }
-                    }, if game_over.load(Ordering::Relaxed) => {
+                    _ = game_over_receiver.recv() => {
+                        println!("游戏结束标志触发，写入任务退出");
                         break;
                     }
                 }
@@ -200,36 +204,30 @@ pub async fn run_game(
 
     // 处理用户输入
     let tx_clone = tx.clone();
-    let game_over_clone = game_over.clone();
-    let input_task = tokio::spawn(async move {
-        while !game_over_clone.load(Ordering::SeqCst) {
-            if handle_user_input(&tx_clone, &game_over_clone).await {
-                println!("游戏结束，关闭输入任务");
-                game_over_clone.store(true, Ordering::SeqCst);
-                break;
-            }
-        }
-        println!("输入任务结束");
-    });
 
-    // // 使用 select! 宏同时等待多个任务
-    // tokio::select! {
-    //     result = read_task => {
-    //         if let Err(e) = result {
-    //             println!("读取任务错误: {}", e);
-    //         }
-    //     }
-    //     result = write_task => {
-    //         if let Err(e) = result {
-    //             println!("写入任务错误: {}", e);
-    //         }
-    //     }
-    //     result = input_task => {
-    //         if let Err(e) = result {
-    //             println!("输入任务错误: {}", e);
-    //         }
-    //     }
-    // }
+    let input_task = {
+        let game_over_sender = game_over_sender.clone();
+        let mut game_over_receiver = game_over_sender.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = game_over_receiver.recv() => {
+                        println!("游戏结束标志触发，输入任务退出");
+                        break;
+                    }
+                    game_over = handle_user_input(&tx_clone) => {
+                        println!("游戏结束，关闭输入任务");
+                        if game_over {
+                            let _ = game_over_sender.send(());
+                            break;
+                        }
+                    }
+                }
+            }
+            println!("输入任务结束");
+        })
+    };
+
     // 等待所有任务完成
     let (read_result, write_result, input_result) = tokio::join!(read_task, write_task, input_task);
 

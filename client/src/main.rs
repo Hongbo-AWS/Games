@@ -1,5 +1,6 @@
 use client::run_game;
 use std::io;
+use std::io::{stdout, Write};
 use tokio_tungstenite::connect_async;
 
 #[tokio::main]
@@ -20,4 +21,6 @@ async fn main() {
         }
         Err(e) => eprintln!("连接失败: {}", e),
     }
+    println!("程序结束");
+    stdout().flush().unwrap(); // ensur
 }
