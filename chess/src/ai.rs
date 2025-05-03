@@ -1,16 +1,39 @@
-use crate::{Board, GameError, PlayerRole};
+use std::sync::Arc;
+
+use tokio::{
+    sync::{mpsc, Mutex},
+    task::JoinHandle,
+};
+
+use crate::{Board, Game, GameError, GameMessage, PlayerRole};
 
 pub struct AIPlayer {
-    player: PlayerRole,
+    pub player: PlayerRole,
     depth: usize,
+    game: Arc<Mutex<Game>>,
 }
 
 impl AIPlayer {
-    pub fn new(player: PlayerRole) -> Self {
+    pub fn new(player: PlayerRole, game: Arc<Mutex<Game>>) -> Self {
         Self {
             player,
             depth: 3, // 增加搜索深度
+            game,
         }
+    }
+
+    pub async fn start(&mut self, mut rx: mpsc::Receiver<GameMessage>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                println!("AI 收到消息: {:?}", message);
+                match message {
+                    GameMessage::Move { row, col } => {
+                        println!("AI 收到移动消息: ({}, {})", row, col);
+                    }
+                    _ => {}
+                }
+            }
+        })
     }
 
     fn evaluate_position(&self, board: &Board, row: usize, col: usize, player: PlayerRole) -> i32 {
@@ -149,7 +172,12 @@ impl AIPlayer {
         score
     }
 
-    pub fn make_move(&self, board: &mut Board) -> Result<(usize, usize), GameError> {
+    pub async fn action(&self) -> Result<(), GameError> {
+        let mut game = self.game.lock().await;
+        let (row, col) = self.make_move(&game.board).unwrap();
+        game.make_move(self.player, row, col).await
+    }
+    pub fn make_move(&self, board: &Board) -> Result<(usize, usize), GameError> {
         let mut best_score = -1;
         let mut best_move = None;
         let opponent = self.player.other();

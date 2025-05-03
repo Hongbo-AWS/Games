@@ -163,7 +163,7 @@ pub async fn run_game(
 
     // 处理写入消息的任务
     let write_task = {
-        let game_over = Arc::clone(&game_over);
+        let game_over = game_over.clone();
         tokio::spawn(async move {
             let mut write = write;
             loop {
@@ -181,9 +181,9 @@ pub async fn run_game(
                                 break;
                             }
                         }
-                    },
+                    }
                     _ = async {
-                        if game_over.load(Ordering::Relaxed) {
+                        if game_over.load(Ordering::SeqCst) {
                             println!("游戏结束标志触发，写入任务退出");
                         }
                     }, if game_over.load(Ordering::Relaxed) => {
