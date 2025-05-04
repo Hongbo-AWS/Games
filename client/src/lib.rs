@@ -1,5 +1,6 @@
-use chess::{Board, GameMessage};
+use chess::{Board, GameMessage, PlayerRole};
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -8,39 +9,38 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-pub async fn handle_game_message(game_msg: GameMessage, board: &mut Board) -> bool {
-    match game_msg {
-        GameMessage::Connect { username } => {
-            println!("\n已连接到游戏，欢迎 {}!", username);
+pub async fn handle_game_message(msg: GameMessage, board: &mut Board) -> bool {
+    match msg {
+        GameMessage::ConnectRequest { username } => {
+            println!("\n正在连接到游戏，用户名: {}...", username);
             false
         }
-        GameMessage::PlayerConnected { player, username } => {
-            println!("玩家 {} ({:?}) 已加入游戏", username, player);
+        GameMessage::ConnectResponse {
+            username,
+            player_role,
+        } => {
+            println!(
+                "\n已连接到游戏，欢迎 {}! 你的角色是: {:?}",
+                username, player_role
+            );
             false
-        }
-        GameMessage::ServerShutdown => {
-            println!("服务器已关闭，游戏结束");
-            true
         }
         GameMessage::Move { row, col } => {
             if let Err(e) = board.make_move(row, col) {
-                println!("移动错误: {}", e);
+                println!("移动失败: {}", e);
+            } else {
+                board.display();
             }
-            board.display();
             false
         }
         GameMessage::Error(msg) => {
-            println!("错误: {}", msg);
+            println!("\n错误: {}", msg);
             false
         }
         GameMessage::GameOver { winner } => {
             match winner {
-                Some(player) => {
-                    println!("游戏结束！胜利者是: {:?}", player);
-                }
-                None => {
-                    println!("游戏结束！平局！");
-                }
+                Some(role) => println!("\n游戏结束！胜利者是: {:?}", role),
+                None => println!("\n游戏结束！平局！"),
             }
             true
         }
@@ -48,15 +48,26 @@ pub async fn handle_game_message(game_msg: GameMessage, board: &mut Board) -> bo
             board: new_board,
             current_player,
         } => {
-            println!("当前玩家: {:?}", current_player);
             board.cells = new_board;
             board.current_player = current_player;
             board.display();
             false
         }
-        GameMessage::PlayerDisconnected { player } => {
-            println!("玩家: {:?} 断开连接", player);
+        GameMessage::TurnNotification { player } => {
+            println!("\n轮到玩家 {:?} 移动", player);
             false
+        }
+        GameMessage::PlayerDisconnected { player } => {
+            println!("\n玩家 {:?} 已断开连接", player);
+            false
+        }
+        GameMessage::PlayerConnected { player, username } => {
+            println!("\n玩家 {} ({:?}) 已加入游戏", username, player);
+            false
+        }
+        GameMessage::ServerShutdown => {
+            println!("\n服务器已关闭");
+            true
         }
     }
 }
@@ -115,7 +126,7 @@ pub async fn run_game(
     let (game_over_sender, _) = broadcast::channel::<()>(16);
 
     // 发送用户名到服务器
-    let connect_msg = GameMessage::Connect { username };
+    let connect_msg = GameMessage::ConnectRequest { username };
     let json = serde_json::to_string(&connect_msg).unwrap();
     if let Err(e) = write.send(Message::Text(json)).await {
         eprintln!("发送用户名失败: {}", e);
@@ -134,36 +145,32 @@ pub async fn run_game(
             println!("开始监听服务器消息...");
             loop {
                 tokio::select! {
-                        _ = game_over_receiver.recv() => {
-                            println!("游戏结束标志触发，读取任务退出");
-                            break;
-                        }
-                        result = read.next() => {
-                            match result {
-                                Some(Ok(msg)) => {
-                                    println!("收到消息: {}", msg);
-                                    if let Message::Text(text) = msg {
-                                        println!("收到消息: {}", text);
-                                        match serde_json::from_str::<GameMessage>(&text) {
-                                            Ok(game_msg) => {
-                                                println!("成功解析消息: {:?}", game_msg);
-                                                let mut board = board_clone.lock().await;
-                                                if handle_game_message(game_msg, &mut board).await {
-                                                    println!("游戏结束，关闭读取任务");
-                                                    let _ = game_over_sender.send(());
-                                                    break;
-                                                }
+                    _ = game_over_receiver.recv() => {
+                        println!("游戏结束标志触发，读取任务退出");
+                        break;
+                    }
+                    result = read.next() => {
+                        match result {
+                            Some(Ok(msg)) => {
+                                if let Message::Text(text) = msg {
+                                    match serde_json::from_str::<GameMessage>(&text) {
+                                        Ok(game_msg) => {
+                                            let mut board = board_clone.lock().await;
+                                            if handle_game_message(game_msg, &mut board).await {
+                                                println!("游戏结束，关闭读取任务");
+                                                let _ = game_over_sender.send(());
+                                                break;
                                             }
-                                            Err(e) => eprintln!("解析消息失败: {}", e),
                                         }
+                                        Err(e) => eprintln!("解析消息失败: {}", e),
                                     }
                                 }
-                                _ => {}
                             }
+                            _ => {}
                         }
+                    }
                 }
             }
-
             println!("读取任务结束");
         })
     };

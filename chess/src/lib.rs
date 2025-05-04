@@ -17,7 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum GameMessage {
     ConnectRequest {
         username: String,
@@ -37,6 +37,9 @@ pub enum GameMessage {
     Status {
         board: [[Option<PlayerRole>; 15]; 15],
         current_player: PlayerRole,
+    },
+    TurnNotification {
+        player: PlayerRole,
     },
     PlayerDisconnected {
         player: PlayerRole,
@@ -129,16 +132,16 @@ impl Board {
 
     pub fn check_winner(&self) -> Option<PlayerRole> {
         let directions = [
-            (0, 1),  // 水平
-            (1, 0),  // 垂直
-            (1, 1),  // 对角线
-            (1, -1), // 反对角线
+            (0, 1, "水平"),      // 水平
+            (1, 0, "垂直"),      // 垂直
+            (1, 1, "对角线"),    // 对角线
+            (1, -1, "反对角线"), // 反对角线
         ];
 
         for row in 0..15 {
             for col in 0..15 {
                 if let Some(player) = self.cells[row][col] {
-                    for &(dr, dc) in &directions {
+                    for &(dr, dc, direction) in &directions {
                         let mut count = 1;
                         let mut r = row as i32;
                         let mut c = col as i32;
@@ -174,6 +177,10 @@ impl Board {
                         }
 
                         if count >= 5 {
+                            println!(
+                                "玩家 {:?} 在 ({}, {}) 位置通过 {} 方向获胜，连续 {} 子",
+                                player, row, col, direction, count
+                            );
                             return Some(player);
                         }
                     }
@@ -200,6 +207,13 @@ impl Game {
         Game {
             board: Board::new(),
             players: HashMap::new(),
+        }
+    }
+
+    async fn send_turn_notification(&self, player: PlayerRole) {
+        if let Some(tx) = self.players.get(&player) {
+            let _ = tx.send(GameMessage::TurnNotification { player }).await;
+            println!("通知玩家 {:?} 轮到你了", player);
         }
     }
 
@@ -234,6 +248,12 @@ impl Game {
                 .unwrap();
         }
         println!("通知其他玩家 {} ({:?}) 已加入", username, player);
+
+        // 如果这是第二个玩家，游戏开始，通知当前玩家轮到他了
+        if self.players.len() == 2 {
+            self.send_turn_notification(self.board.current_player).await;
+        }
+
         Ok(())
     }
 
@@ -255,7 +275,11 @@ impl Game {
         }
 
         println!("执行移动: ({}, {})", row, col);
-        self.board.make_move(row, col)?;
+        if let Err(e) = self.board.make_move(row, col) {
+            // 移动失败，通知当前玩家继续尝试
+            self.send_turn_notification(player).await;
+            return Err(e);
+        }
 
         // 通知所有玩家移动和新的游戏状态
         println!("通知所有玩家移动和新的游戏状态");
@@ -268,6 +292,9 @@ impl Game {
             .await
             .unwrap();
         }
+
+        // 通知下一个玩家轮到他们了
+        self.send_turn_notification(self.board.current_player).await;
 
         if let Some(winner) = self.board.check_winner() {
             println!("游戏结束！胜利者是: {:?}", winner);
@@ -355,20 +382,35 @@ impl NetworkPlayer {
         let username = match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 println!("收到连接消息: {}", text);
-                if let Ok(GameMessage::ConnectRequest { username }) = serde_json::from_str(&text) {
-                    println!("新玩家 {} 正在连接...", username);
-                    username
-                } else {
-                    println!("无效的连接消息格式");
-                    let _ = ws_sender
-                        .send(Message::Text(
-                            serde_json::to_string(&GameMessage::Error(
-                                "无效的连接消息".to_string(),
+                match serde_json::from_str::<GameMessage>(&text) {
+                    Ok(GameMessage::ConnectRequest { username }) => {
+                        println!("新玩家 {} 正在连接...", username);
+                        username
+                    }
+                    Ok(_) => {
+                        println!("无效的连接消息类型");
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::to_string(&GameMessage::Error(
+                                    "无效的连接消息类型".to_string(),
+                                ))
+                                .unwrap(),
                             ))
-                            .unwrap(),
-                        ))
-                        .await;
-                    return;
+                            .await;
+                        return;
+                    }
+                    Err(e) => {
+                        println!("解析连接消息失败: {}", e);
+                        let _ = ws_sender
+                            .send(Message::Text(
+                                serde_json::to_string(&GameMessage::Error(
+                                    "解析连接消息失败".to_string(),
+                                ))
+                                .unwrap(),
+                            ))
+                            .await;
+                        return;
+                    }
                 }
             }
             _ => {
